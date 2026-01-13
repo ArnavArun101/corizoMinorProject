@@ -16,17 +16,37 @@ st.set_page_config(
     layout="wide"
 )
 
+
 @st.cache_data
 def download_stock_data(ticker, start_date, end_date):
     """Download stock data from Yahoo Finance"""
     try:
         data = yf.download(ticker, start=start_date, end=end_date, progress=False)
 
-        # Clean data
+        # Handle empty data
+        if data.empty:
+            st.error(f"No data found for {ticker}")
+            return None
+
+        # Clean multi-level columns
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
 
+        # Reset index to make Date a column, then set it back
+        # This ensures consistent date handling
+        data = data.reset_index()
+        if 'Date' in data.columns:
+            data.set_index('Date', inplace=True)
+
+        # Ensure all required columns exist
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        for col in required_cols:
+            if col not in data.columns:
+                st.error(f"Missing column: {col}")
+                return None
+
         return data
+
     except Exception as e:
         st.error(f"Error downloading data: {e}")
         return None
@@ -49,21 +69,26 @@ def create_features(data):
     df['Price_Change'] = df['Close'].pct_change() * 100
     df['Price_Momentum_3'] = ((df['Close'] - df['Close'].shift(3)) / df['Close'].shift(3)) * 100
 
-    # Volume features
+    # Volume features with zero-division protection
     df['Volume_Change'] = df['Volume'].pct_change() * 100
     df['Volume_MA_7'] = df['Volume'].rolling(window=7).mean()
-    df['Volume_Ratio'] = df['Volume'] / df['Volume_MA_7']
+
+    # Prevent division by zero
+    df['Volume_Ratio'] = df['Volume'] / df['Volume_MA_7'].replace(0, np.nan)
 
     # Volatility
     df['Daily_Volatility'] = df['High'] - df['Low']
     df['ATR_7'] = df['Daily_Volatility'].rolling(window=7).mean()
 
-    # Additional
+    # Additional with zero-division protection
     df['Gap'] = df['Open'] - df['Close'].shift(1)
-    df['Gap_Percent'] = (df['Gap'] / df['Close'].shift(1)) * 100
+    df['Gap_Percent'] = (df['Gap'] / df['Close'].shift(1).replace(0, np.nan)) * 100
 
     # Target
     df['Target'] = df['Close'].shift(-1)
+
+    # Replace infinities with NaN
+    df = df.replace([np.inf, -np.inf], np.nan)
 
     # Drop missing values
     df = df.dropna()
@@ -73,6 +98,12 @@ def create_features(data):
 
 def train_model(df):
     """Train Linear Regression model"""
+
+    # Check if we have enough data
+    if len(df) < 100:
+        st.error(f"Not enough data! Only {len(df)} samples. Need at least 100.")
+        return None, None, None, None, None, None, None, None
+
     # Select features
     feature_columns = [
         'Close_Lag_1', 'MA_7', 'MA_30', 'Price_Change',
@@ -80,8 +111,16 @@ def train_model(df):
         'Price_Momentum_3', 'ATR_7', 'Gap_Percent'
     ]
 
+    # Check if all features exist
+    missing_features = [col for col in feature_columns if col not in df.columns]
+    if missing_features:
+        st.error(f"Missing features: {missing_features}")
+        return None, None, None, None, None, None, None, None
+
     X = df[feature_columns]
     y = df['Target']
+
+    # Rest of the code stays the same...
 
     # Split data (80/20)
     split_index = int(len(X) * 0.8)
@@ -148,17 +187,33 @@ This app predicts stock prices using:
 """)
 
 if run_analysis:
-    with st.spinner(f"Downloading {ticker} data..."):
-        data = download_stock_data(ticker, start_date, end_date)
+    try:
+        with st.spinner(f"Downloading {ticker} data..."):
+            data = download_stock_data(ticker, start_date, end_date)
 
-    if data is not None and len(data) > 0:
-        st.success(f" Downloaded {len(data)} days of data")
+        if data is not None and len(data) > 0:
+            st.success(f"✅ Downloaded {len(data)} days of data")
 
-        # Create features
-        with st.spinner("Creating features..."):
-            df_featured = create_features(data)
+            # Show data info for debugging
+            with st.expander("📊 Data Info (Debug)"):
+                st.write(f"Shape: {data.shape}")
+                st.write(f"Columns: {data.columns.tolist()}")
+                st.write(f"Date range: {data.index[0]} to {data.index[-1]}")
+                st.dataframe(data.head())
 
-        st.success(f" Created features ({len(df_featured)} samples ready)")
+            # Create features
+            with st.spinner("Creating features..."):
+                df_featured = create_features(data)
+
+            if len(df_featured) == 0:
+                st.error("❌ No valid samples after feature engineering!")
+                st.stop()
+
+            st.success(f"✅ Created features ({len(df_featured)} samples ready)")
+
+    except Exception as e:
+        st.error(f"❌ Error occurred: {str(e)}")
+        st.exception(e)  # This shows full error traceback
 
         # Train model
         with st.spinner("Training model..."):
