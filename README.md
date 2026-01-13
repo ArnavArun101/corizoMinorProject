@@ -1,7 +1,7 @@
 # Stock Price Prediction Project
 
 ## Overview
-This project implements a stock price prediction system using machine learning techniques (Linear Regression and KNN).
+This project implements a stock price prediction system using machine learning techniques (Linear Regression).
 It includes an interactive web dashboard built with Streamlit for visualizing predictions and model performance.
 
 ## Project Structure
