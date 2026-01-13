@@ -56,6 +56,7 @@ def create_features(data):
     """Create features from stock data"""
     df = data.copy()
 
+
     # Moving averages
     df['MA_7'] = df['Close'].rolling(window=7).mean()
     df['MA_30'] = df['Close'].rolling(window=30).mean()
@@ -72,15 +73,13 @@ def create_features(data):
     # Volume features with zero-division protection
     df['Volume_Change'] = df['Volume'].pct_change() * 100
     df['Volume_MA_7'] = df['Volume'].rolling(window=7).mean()
-
-    # Prevent division by zero
     df['Volume_Ratio'] = df['Volume'] / df['Volume_MA_7'].replace(0, np.nan)
 
     # Volatility
     df['Daily_Volatility'] = df['High'] - df['Low']
     df['ATR_7'] = df['Daily_Volatility'].rolling(window=7).mean()
 
-    # Additional with zero-division protection
+    # Additional features
     df['Gap'] = df['Open'] - df['Close'].shift(1)
     df['Gap_Percent'] = (df['Gap'] / df['Close'].shift(1).replace(0, np.nan)) * 100
 
@@ -93,16 +92,14 @@ def create_features(data):
     # Drop missing values
     df = df.dropna()
 
+    if len(df) == 0:
+        raise ValueError("All rows were dropped during feature engineering!")
+
     return df
 
 
 def train_model(df):
     """Train Linear Regression model"""
-
-    # Check if we have enough data
-    if len(df) < 100:
-        st.error(f"Not enough data! Only {len(df)} samples. Need at least 100.")
-        return None, None, None, None, None, None, None, None
 
     # Select features
     feature_columns = [
@@ -112,20 +109,25 @@ def train_model(df):
     ]
 
     # Check if all features exist
-    missing_features = [col for col in feature_columns if col not in df.columns]
-    if missing_features:
-        st.error(f"Missing features: {missing_features}")
+    missing = [col for col in feature_columns if col not in df.columns]
+    if missing:
+        st.error(f"Missing features: {missing}")
         return None, None, None, None, None, None, None, None
 
     X = df[feature_columns]
     y = df['Target']
 
-    # Rest of the code stays the same...
+    # Check for sufficient data
+    if len(X) < 100:
+        st.error(f"Not enough data: {len(X)} samples (need at least 100)")
+        return None, None, None, None, None, None, None, None
 
     # Split data (80/20)
     split_index = int(len(X) * 0.8)
-    X_train, X_test = X[:split_index], X[split_index:]
-    y_train, y_test = y[:split_index], y[split_index:]
+    X_train = X[:split_index]
+    X_test = X[split_index:]
+    y_train = y[:split_index]
+    y_test = y[split_index:]
 
     # Train model
     model = LinearRegression()
@@ -145,6 +147,7 @@ def train_model(df):
         'test_r2': r2_score(y_test, test_pred)
     }
 
+    # Return all 8 values
     return model, X_train, X_test, y_train, y_test, test_pred, metrics, feature_columns
 
 # Title
@@ -192,10 +195,10 @@ if run_analysis:
             data = download_stock_data(ticker, start_date, end_date)
 
         if data is not None and len(data) > 0:
-            st.success(f"✅ Downloaded {len(data)} days of data")
+            st.success(f" Downloaded {len(data)} days of data")
 
             # Show data info for debugging
-            with st.expander("📊 Data Info (Debug)"):
+            with st.expander(" Raw Data Preview"):
                 st.write(f"Shape: {data.shape}")
                 st.write(f"Columns: {data.columns.tolist()}")
                 st.write(f"Date range: {data.index[0]} to {data.index[-1]}")
@@ -206,162 +209,166 @@ if run_analysis:
                 df_featured = create_features(data)
 
             if len(df_featured) == 0:
-                st.error("❌ No valid samples after feature engineering!")
+                st.error(" No valid samples after feature engineering!")
                 st.stop()
 
-            st.success(f"✅ Created features ({len(df_featured)} samples ready)")
+            st.success(f" Created features ({len(df_featured)} samples ready)")
+
+            # Show featured data columns
+            with st.expander(" Featured Data Preview"):
+                st.write(f"Shape: {df_featured.shape}")
+                st.write(f"Columns: {df_featured.columns.tolist()}")
+                st.dataframe(df_featured.head())
+
+            # Train model
+            with st.spinner("Training model..."):
+                result = train_model(df_featured)
+
+                # Check if result is valid
+                if result is None or result[0] is None:
+                    st.error(" Model training returned None!")
+                    st.stop()
+
+                # Unpack results
+                model, X_train, X_test, y_train, y_test, predictions, metrics, features = result
+
+            st.success(" Model trained successfully!")
+
+
+            st.markdown("##  Model Performance")
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric(
+                    label="Current Price",
+                    value=f"${data['Close'].iloc[-1]:.2f}"
+                )
+
+            with col2:
+                st.metric(
+                    label="Test RMSE",
+                    value=f"${metrics['test_rmse']:.2f}"
+                )
+
+            with col3:
+                st.metric(
+                    label="Test MAE",
+                    value=f"${metrics['test_mae']:.2f}"
+                )
+
+            with col4:
+                st.metric(
+                    label="R² Score",
+                    value=f"{metrics['test_r2']:.4f}"
+                )
+
+            st.markdown("---")
+
+            st.markdown("##  Predictions vs Actual")
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(y_test.index, y_test.values, label='Actual Price',
+                    linewidth=2, marker='o', markersize=4, color='blue')
+            ax.plot(y_test.index, predictions, label='Predicted Price',
+                    linewidth=2, linestyle='--', marker='s', markersize=4, color='red')
+            ax.set_xlabel('Date', fontsize=12)
+            ax.set_ylabel('Price ($)', fontsize=12)
+            ax.set_title(f'{ticker} - Model Predictions', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3)
+
+            st.pyplot(fig)
+
+            st.markdown("##  Historical Price")
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(data.index, data['Close'], linewidth=2, color='blue')
+            ax.set_xlabel('Date', fontsize=12)
+            ax.set_ylabel('Price ($)', fontsize=12)
+            ax.set_title(f'{ticker} - Historical Closing Price', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+
+            st.pyplot(fig)
+
+            st.markdown("##  Feature Importance")
+
+            feature_importance = pd.DataFrame({
+                'Feature': features,
+                'Coefficient': model.coef_
+            })
+            feature_importance['Abs_Coefficient'] = abs(feature_importance['Coefficient'])
+            feature_importance = feature_importance.sort_values('Abs_Coefficient', ascending=False)
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            colors = ['green' if x > 0 else 'red' for x in feature_importance['Coefficient']]
+            ax.barh(range(len(feature_importance)), feature_importance['Coefficient'],
+                    color=colors, alpha=0.7)
+            ax.set_yticks(range(len(feature_importance)))
+            ax.set_yticklabels(feature_importance['Feature'])
+            ax.set_xlabel('Coefficient Value', fontsize=12)
+            ax.set_title('Feature Importance', fontsize=14, fontweight='bold')
+            ax.axvline(x=0, color='black', linestyle='--', linewidth=1)
+            ax.grid(True, alpha=0.3, axis='x')
+
+            st.pyplot(fig)
+
+            st.markdown("##  Tomorrow's Prediction")
+
+            # Get last features
+            X_full = df_featured[features]
+            last_features = X_full.iloc[-1:].values
+            tomorrow_pred = model.predict(last_features)[0]
+
+            current_price = float(data['Close'].iloc[-1])
+            change = tomorrow_pred - current_price
+            change_percent = (change / current_price) * 100
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    label="Today's Price",
+                    value=f"${current_price:.2f}"
+                )
+
+            with col2:
+                st.metric(
+                    label="Predicted Tomorrow",
+                    value=f"${tomorrow_pred:.2f}",
+                    delta=f"${change:.2f}"
+                )
+
+            with col3:
+                st.metric(
+                    label="Expected Change",
+                    value=f"{change_percent:.2f}%",
+                    delta=f"{'📈 UP' if change > 0 else '📉 DOWN'}"
+                )
+
+            st.markdown("##  Recent Predictions")
+
+            results_df = pd.DataFrame({
+                'Date': y_test.index[-10:],
+                'Actual': y_test.values[-10:],
+                'Predicted': predictions[-10:],
+                'Error': (y_test.values[-10:] - predictions[-10:])
+            })
+            results_df['Actual'] = results_df['Actual'].map('${:.2f}'.format)
+            results_df['Predicted'] = results_df['Predicted'].map('${:.2f}'.format)
+            results_df['Error'] = results_df['Error'].map('${:.2f}'.format)
+
+            st.dataframe(results_df, use_container_width=True)
+
 
     except Exception as e:
-        st.error(f"❌ Error occurred: {str(e)}")
-        st.exception(e)  # This shows full error traceback
-
-        # Train model
-        with st.spinner("Training model..."):
-            model, X_train, X_test, y_train, y_test, predictions, metrics, features = train_model(df_featured)
-
-        st.success(" Model trained successfully!")
-
-        st.markdown("##  Model Performance")
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.metric(
-                label="Current Price",
-                value=f"${data['Close'].iloc[-1]:.2f}"
-            )
-
-        with col2:
-            st.metric(
-                label="Test RMSE",
-                value=f"${metrics['test_rmse']:.2f}"
-            )
-
-        with col3:
-            st.metric(
-                label="Test MAE",
-                value=f"${metrics['test_mae']:.2f}"
-            )
-
-        with col4:
-            st.metric(
-                label="R² Score",
-                value=f"{metrics['test_r2']:.4f}"
-            )
-
-        st.markdown("---")
-
-        st.markdown("##  Predictions vs Actual")
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(y_test.index, y_test.values, label='Actual Price',
-                linewidth=2, marker='o', markersize=4, color='blue')
-        ax.plot(y_test.index, predictions, label='Predicted Price',
-                linewidth=2, linestyle='--', marker='s', markersize=4, color='red')
-        ax.set_xlabel('Date', fontsize=12)
-        ax.set_ylabel('Price ($)', fontsize=12)
-        ax.set_title(f'{ticker} - Model Predictions', fontsize=14, fontweight='bold')
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
-
-        st.pyplot(fig)
-
-        st.markdown("##  Historical Price")
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(data.index, data['Close'], linewidth=2, color='blue')
-        ax.set_xlabel('Date', fontsize=12)
-        ax.set_ylabel('Price ($)', fontsize=12)
-        ax.set_title(f'{ticker} - Historical Closing Price', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3)
-
-        st.pyplot(fig)
-
-
-        st.markdown("##  Feature Importance")
-
-        feature_importance = pd.DataFrame({
-            'Feature': features,
-            'Coefficient': model.coef_
-        })
-        feature_importance['Abs_Coefficient'] = abs(feature_importance['Coefficient'])
-        feature_importance = feature_importance.sort_values('Abs_Coefficient', ascending=False)
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        colors = ['green' if x > 0 else 'red' for x in feature_importance['Coefficient']]
-        ax.barh(range(len(feature_importance)), feature_importance['Coefficient'],
-                color=colors, alpha=0.7)
-        ax.set_yticks(range(len(feature_importance)))
-        ax.set_yticklabels(feature_importance['Feature'])
-        ax.set_xlabel('Coefficient Value', fontsize=12)
-        ax.set_title('Feature Importance', fontsize=14, fontweight='bold')
-        ax.axvline(x=0, color='black', linestyle='--', linewidth=1)
-        ax.grid(True, alpha=0.3, axis='x')
-
-        st.pyplot(fig)
-
-        st.markdown("##  Tomorrow's Prediction")
-
-        # Get last features
-        X_full = df_featured[features]
-        last_features = X_full.iloc[-1:].values
-        tomorrow_pred = model.predict(last_features)[0]
-
-        current_price = float(data['Close'].iloc[-1])
-        change = tomorrow_pred - current_price
-        change_percent = (change / current_price) * 100
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric(
-                label="Today's Price",
-                value=f"${current_price:.2f}"
-            )
-
-        with col2:
-            st.metric(
-                label="Predicted Tomorrow",
-                value=f"${tomorrow_pred:.2f}",
-                delta=f"${change:.2f}"
-            )
-
-        with col3:
-            st.metric(
-                label="Expected Change",
-                value=f"{change_percent:.2f}%",
-                delta=f"{'📈 UP' if change > 0 else '📉 DOWN'}"
-            )
-
-        st.markdown("##  Recent Predictions")
-
-        results_df = pd.DataFrame({
-            'Date': y_test.index[-10:],
-            'Actual': y_test.values[-10:],
-            'Predicted': predictions[-10:],
-            'Error': (y_test.values[-10:] - predictions[-10:])
-        })
-        results_df['Actual'] = results_df['Actual'].map('${:.2f}'.format)
-        results_df['Predicted'] = results_df['Predicted'].map('${:.2f}'.format)
-        results_df['Error'] = results_df['Error'].map('${:.2f}'.format)
-
-        st.dataframe(results_df, use_container_width=True)
-
-
-        # Prepare full results
-        full_results = pd.DataFrame({
-            'Date': y_test.index,
-            'Actual': y_test.values,
-            'Predicted': predictions,
-            'Error': y_test.values - predictions
-        })
-
-        csv = full_results.to_csv(index=False)
-
+        st.error(f" Unexpected error: {str(e)}")
+        st.exception(e)
 
 else:
     # Instructions when app first loads
-    st.info(" Configure settings in the sidebar and click 'Run Analysis' to begin!")
+    st.info(" Configure settings in the sidebar and click '🚀 Run Analysis' to begin!")
+
 
 
 # Footer
